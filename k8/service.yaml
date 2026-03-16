@@ -1,0 +1,135 @@
+# k8s/service.yaml
+# ============================================
+# Kubernetes Service Configuration
+# ============================================
+#
+# PURPOSE: Expose FastAPI to the outside world
+#          Acts as a load balancer for FastAPI pods
+#
+# WHAT THIS DOES:
+#   - Creates Service that distributes traffic across 3 FastAPI pods
+#   - Provides stable IP (even if pods change)
+#   - Load balances requests
+#   - Exposes via AWS Load Balancer (Phase 9)
+#
+# USAGE (Phase 9):
+#   Deploy: kubectl apply -f k8s/service.yaml
+#   Check:  kubectl get svc claims-api
+#   Get URL: kubectl get svc claims-api -o wide
+
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: claims-api
+  # Service name (used for DNS within Kubernetes)
+
+  namespace: default
+
+  labels:
+    app: claims-engine
+    component: api
+
+  annotations:
+    description: "FastAPI Claims Triage & Fraud Detection Engine"
+
+spec:
+  type: LoadBalancer
+  # Type: LoadBalancer
+  #   - AWS: Creates AWS Load Balancer (ELB/ALB)
+  #   - Assigns external IP
+  #   - Routes traffic to FastAPI pods
+
+  selector:
+    app: claims-engine
+    component: api
+  # Route traffic to pods with these labels
+
+  ports:
+    - name: http
+      port: 80
+      # External port (what users access)
+
+      targetPort: 8000
+      # Internal pod port (where FastAPI listens)
+
+      protocol: TCP
+
+  sessionAffinity: ClientIP
+  # Sticky sessions: Same user always hits same pod
+  # Reason: Session state preserved (if implementing sessions)
+
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+      # Keep affinity for 1 hour
+
+---
+# ConfigMap: Non-sensitive configuration
+# (Sensitive config goes in Secrets)
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: claims-api-config
+  namespace: default
+
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  API_KEY_HEADER_NAME: "X-API-Key"
+  JWT_ALGORITHM: "HS256"
+  JWT_EXPIRATION_HOURS: "24"
+  MIN_CONFIDENCE_THRESHOLD: "0.7"
+  BERT_MODEL_NAME: "distilbert-base-uncased"
+
+---
+# Secret: Sensitive configuration (passwords, keys)
+# NOTE: In production, use AWS Secrets Manager instead
+#       This is placeholder for Phase 9 setup
+apiVersion: v1
+kind: Secret
+
+metadata:
+  name: db-credentials
+  namespace: default
+
+type: Opaque
+
+data:
+  # Encode in base64 (not encrypted, just encoded)
+  # In production: Use AWS Secrets Manager for encryption
+
+  username: Y2xhaW1zX3VzZXI= # base64: claims_user
+  password: Y2hhbmdlX21lX2luX3Byb2Q= # base64: change_me_in_prod
+
+---
+# Secret: App secrets
+apiVersion: v1
+kind: Secret
+
+metadata:
+  name: app-secrets
+  namespace: default
+
+type: Opaque
+
+data:
+  secret-key: Y2hhbmdlX21lX2luX3Byb2Q= # base64: change_me_in_prod
+  # In production: Generate strong key with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+---
+# Secret: Redis credentials
+apiVersion: v1
+kind: Secret
+
+metadata:
+  name: redis-credentials
+  namespace: default
+
+type: Opaque
+
+data:
+  password: Y2hhbmdlX21lX2luX3Byb2Q= # base64: change_me_in_prod
+  # In production: Generate strong password and encode to base64

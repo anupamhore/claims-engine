@@ -221,6 +221,257 @@ Automatically classify insurance claims by urgency and fraud probability using N
 
 ---
 
+## 🏗️ Production Deployment Architecture (Phase 9)
+
+### Critical Design Decision: Stateless Kubernetes + Managed Services
+
+**PROBLEM IDENTIFIED:** Databases in Kubernetes pods pose data loss risk for insurance claims.
+
+**SOLUTION:** Separate concerns into two layers:
+
+#### Layer 1: Stateless Services in Kubernetes (EKS)
+
+These services are **ephemeral** - pods can be replaced anytime without data loss:
+
+```
+Kubernetes Cluster (AWS EKS)
+├── FastAPI Deployment (x3 replicas, auto-scales 3-10)
+│   ├─ Stateless microservice (can be replaced)
+│   ├─ Connects to: AWS RDS PostgreSQL
+│   ├─ Connects to: AWS ElastiCache Redis
+│   └─ Scales horizontally based on load
+│
+├── Streamlit Deployment
+│   ├─ Auditor dashboard for claims review
+│   ├─ Connects to: AWS RDS PostgreSQL
+│   └─ Connects to: AWS ElastiCache Redis
+│
+└── Worker Deployment (ML/Kafka processing)
+    ├─ Stateless background jobs
+    ├─ Consumes: Kafka topics from MSK
+    ├─ Reads/Writes: AWS RDS PostgreSQL
+    └─ Scales based on queue depth
+```
+
+#### Layer 2: Managed AWS Services (Data Persistence)
+
+These services are **persistent** - managed by AWS with automatic backups:
+
+```
+AWS Managed Services (Stateful, Critical Data)
+├── RDS PostgreSQL (Multi-AZ)
+│   ├─ Automatic failover (Zero downtime)
+│   ├─ Automated daily backups (35-day retention)
+│   ├─ Point-in-time recovery (PITR) capability
+│   ├─ Encryption at rest + in transit
+│   ├─ Security groups (FastAPI pods only)
+│   ├─ Cost: ~$50-100/month
+│   └─ WHY: Insurance claims data is critical - NO data loss acceptable
+│
+├── ElastiCache Redis Cluster Mode
+│   ├─ Automatic failover (replication across AZs)
+│   ├─ Automated backups
+│   ├─ Encryption at rest + in transit
+│   ├─ Security groups (FastAPI pods only)
+│   ├─ Cost: ~$50-70/month
+│   └─ WHY: Cache layer for performance, backed up daily
+│
+├── S3 Bucket
+│   ├─ Store ML models (downloaded from HuggingFace)
+│   ├─ Store application logs
+│   ├─ Store database backups
+│   └─ Versioning enabled (disaster recovery)
+│
+├── AWS Secrets Manager
+│   ├─ Store database credentials
+│   ├─ Store API keys (Groq, OpenAI)
+│   ├─ Store JWT secret keys
+│   ├─ Automatic rotation (every 90 days)
+│   └─ No secrets in Git or .env files
+│
+└── AWS MSK (Managed Kafka) [Phase 6+]
+    ├─ Managed Kafka cluster (event streaming)
+    ├─ Auto-scaling brokers
+    ├─ Encryption at rest + in transit
+    └─ Multi-AZ replication
+```
+
+### Why NOT Run Databases in Kubernetes Pods?
+
+**RISK ANALYSIS:**
+
+| Scenario                         | Kubernetes Pod             | AWS Managed Service                |
+| -------------------------------- | -------------------------- | ---------------------------------- |
+| Pod crashes                      | Volume reattachment fails? | Automatic failover (30s)           |
+| Node failure                     | Data stuck on dead node    | Replicated across AZs              |
+| Disk corruption                  | Manual recovery needed     | Automated restore from backup      |
+| Power outage                     | Data potentially lost      | Automatic recovery from RDS backup |
+| Human error (delete)             | No backup, data lost       | 35-day backup retention            |
+| **Insurance claims loss impact** | **CATASTROPHIC** 💥        | **NONE** ✅                        |
+
+**For insurance claims data: Data loss is unacceptable**
+
+- Regulatory liability (insurance must pay claims again)
+- Legal liability (GDPR, insurance regulations)
+- Financial impact: Millions in fines + payouts
+- Reputation damage: Cannot operate as insurance company
+
+**AWS Managed Services cost vs Risk:**
+
+- RDS + ElastiCache: ~$120-170/month
+- Insurance company claim payout (one lost claim): $10,000-1,000,000
+- **ROI: Protecting data is MANDATORY**
+
+### Phase 2 vs Phase 9 Strategy
+
+#### Phase 2 (Local Development - NOW):
+
+```yaml
+# docker-compose.yml (all running locally)
+services:
+  postgres: # Container (local dev)
+  redis: # Container (local dev)
+  # FastAPI:   # Native on MacBook
+```
+
+**Why containers in Phase 2?**
+
+- Fast iteration (seconds to rebuild)
+- Easy cleanup (docker-compose down -v)
+- No cost
+- Perfect for development (data doesn't matter)
+
+#### Phase 9 (Production - AWS):
+
+```hcl
+# Terraform (infrastructure as code)
+resources:
+  Kubernetes (EKS):
+    - FastAPI pods (stateless, auto-scale)
+    - Streamlit pod (stateless)
+    - Worker pods (stateless)
+
+  AWS RDS:
+    - PostgreSQL (managed, backed up, HA)
+
+  AWS ElastiCache:
+    - Redis (managed, backed up, HA)
+```
+
+**Why managed services in Phase 9?**
+
+- Insurance data safety (automated backups)
+- High availability (automatic failover)
+- Zero operational overhead (AWS manages everything)
+- Professional SLA compliance
+- Industry standard for financial/insurance apps
+
+### Production Deployment Flow
+
+```
+Phase 2 → Phase 9 Transition:
+
+DEVELOPMENT (Phases 2-8):
+docker-compose up
+├─ PostgreSQL container (local)
+├─ Redis container (local)
+└─ FastAPI on MacBook
+
+         ↓ (Transition to production)
+
+PRODUCTION (Phase 9 - AWS):
+kubectl apply -f k8s/
+├─ FastAPI pods (EKS)
+├─ RDS PostgreSQL (managed)
+└─ ElastiCache Redis (managed)
+
+Same Docker images, different infrastructure!
+Same application code, just orchestrated by Kubernetes + AWS instead of Docker Compose!
+```
+
+### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ AWS Cloud (Phase 9)                                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│ Kubernetes Cluster (EKS)                                        │
+│ ┌─────────────────────────────────────────────────────────┐   │
+│ │ Load Balancer (AWS ALB)                                 │   │
+│ │       ↓                                                  │   │
+│ │ ┌─────────────────────────────────────────────────┐   │   │
+│ │ │ FastAPI Pods (x3, auto-scales 3-10)           │   │   │
+│ │ ├─ Pod 1 → RDS PostgreSQL ──┐                   │   │   │
+│ │ ├─ Pod 2 → RDS PostgreSQL   ├─→ Multi-AZ HA   │   │   │
+│ │ ├─ Pod 3 → RDS PostgreSQL ──┘                   │   │   │
+│ │ └─────────────────────────────────────────────────┘   │   │
+│ │         ↓↑ (Redis cache layer)                       │   │
+│ │ ┌─────────────────────────────────────────────────┐   │   │
+│ │ │ ElastiCache Redis (Cluster Mode)                │   │   │
+│ │ │ ├─ Primary node                                 │   │   │
+│ │ │ ├─ Replica nodes (multi-AZ)                    │   │   │
+│ │ │ └─ Automatic failover                          │   │   │
+│ │ └─────────────────────────────────────────────────┘   │   │
+│ │         ↓↑ (Kafka for async processing)             │   │   │
+│ │ ┌─────────────────────────────────────────────────┐   │   │
+│ │ │ Worker Pods (ML/Fraud processing)              │   │   │
+│ │ │ ├─ Consume: Kafka topics                       │   │   │
+│ │ │ ├─ Process: ML predictions                     │   │   │
+│ │ │ └─ Store: Results in RDS                       │   │   │
+│ │ └─────────────────────────────────────────────────┘   │   │
+│ └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│ AWS Managed Services (Outside K8s)                             │
+│ ┌─────────────────────────────────────────────────────────┐   │
+│ │ RDS PostgreSQL (Multi-AZ)                              │   │
+│ │ ├─ Primary: Active database                           │   │
+│ │ ├─ Replica: Hot standby (automatic failover)          │   │
+│ │ ├─ Backups: Daily (35-day retention)                  │   │
+│ │ └─ Encryption: At rest + in transit                   │   │
+│ └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│ Secrets & Storage                                              │
+│ ├─ AWS Secrets Manager (credentials, API keys)                │
+│ ├─ S3 (ML models, logs, backups)                              │
+│ └─ CloudWatch (monitoring, alerts)                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Cost Breakdown (Phase 9 - Production)
+
+```
+Monthly AWS Costs (Typical):
+
+Kubernetes (EKS):
+  - EKS cluster: $73 (fixed)
+  - Compute (3-10 pods): $150-300
+  - Total: ~$223-373/month
+
+Managed Databases:
+  - RDS PostgreSQL (db.t3.medium, Multi-AZ): $80-150
+  - ElastiCache Redis (cache.t3.small, Cluster): $60-100
+  - Total: ~$140-250/month
+
+Storage & Services:
+  - S3 (logs, models, backups): $10-20
+  - Secrets Manager: $0.40/secret/month ($5)
+  - CloudWatch (monitoring): $10-20
+  - MSK Kafka (optional, Phase 6+): $200-500
+  - Total: ~$25-545/month
+
+TOTAL: $388-1,168/month (depending on features)
+
+For an insurance company processing claims:
+- Prevents single claim data loss (easily $100K+)
+- Ensures 99.9% uptime ($1M+ in liability)
+- Professional compliance (regulatory requirement)
+- **Cost is MINIMAL compared to value**
+```
+
+---
+
 ## Detailed Requirements & Features
 
 ### ML/Fraud Detection Requirements
@@ -1391,6 +1642,169 @@ except LLMServiceError as e:
 - Complete system being developed locally on MacBook
 - Deployed to AWS for production scale (Phase 9)
 - No terminology or description will contradict this reality
+
+---
+
+## ✅ Agreement 8: Full Docker + Kubernetes Architecture (BINDING)
+
+### 8.1 Development Environment Strategy
+
+**DECISION: Full Docker containerization for local development**
+
+Your entire application stack runs in Docker containers during development, exactly matching production Kubernetes deployment.
+
+```
+LOCAL DEVELOPMENT (MacBook):
+┌─────────────────────────────────────────┐
+│      docker-compose.yml runs:           │
+├─────────────────────────────────────────┤
+│  ✓ PostgreSQL 15 (Container)            │
+│  ✓ Redis 7 (Container)                  │
+│  ✓ Your FastAPI App (MacBook, native)   │
+│                                         │
+│  FastAPI connects to Docker containers  │
+│  via service names (postgres, redis)    │
+└─────────────────────────────────────────┘
+
+PRODUCTION DEPLOYMENT (Kubernetes):
+┌─────────────────────────────────────────┐
+│    kubectl apply -f k8s/deployment.yaml │
+├─────────────────────────────────────────┤
+│  ✓ PostgreSQL 15 Pod                    │
+│  ✓ Redis 7 Pod                          │
+│  ✓ FastAPI Pod (replica 1-N)            │
+│  ✓ Streamlit Pod                        │
+│  ✓ Worker Pods (ML/Kafka)               │
+│                                         │
+│  Exact same Docker images as local dev  │
+│  Kubernetes orchestrates scaling        │
+└─────────────────────────────────────────┘
+```
+
+### 8.2 Industry Standard: This IS How Modern Apps Are Built
+
+**Why this architecture is industry standard:**
+
+| Aspect                     | Your Approach             | Industry Standard    |
+| -------------------------- | ------------------------- | -------------------- |
+| Docker in Development      | ✅ Yes                    | ✅ Yes (required)    |
+| Docker in Production       | ✅ Yes                    | ✅ Yes (required)    |
+| All Services Containerized | ✅ Yes (DB + Redis + App) | ✅ Yes               |
+| Kubernetes Orchestration   | ✅ Yes                    | ✅ Yes (production)  |
+| Same Images Dev→Prod       | ✅ Yes                    | ✅ Yes (0 surprises) |
+| Complete Pipeline Testing  | ✅ Possible locally       | ✅ Recommended       |
+
+**Companies using this exact pattern:**
+
+- Netflix: All services containerized + Kubernetes (Titus)
+- Google: Kubernetes creator, uses for all services
+- Uber: Docker + Mesos (similar to Kubernetes)
+- Stripe: Docker + Kubernetes for financial processing
+- Every major fintech/insurance company (2024+)
+
+### 8.3 Benefits for Your Insurance Claims Engine
+
+| Benefit                    | Impact                                               | Why Matters                            |
+| -------------------------- | ---------------------------------------------------- | -------------------------------------- |
+| **Dev = Prod Parity**      | No "works on my Mac" surprises                       | Catch bugs before production           |
+| **Database Isolation**     | PostgreSQL runs in container, doesn't touch your Mac | Clean system, easy cleanup             |
+| **Redis Isolation**        | Redis runs in container                              | No port conflicts, clean state         |
+| **Easy Onboarding**        | New developers: `docker-compose up` (1 command)      | vs 20 manual steps                     |
+| **CI/CD Ready**            | GitHub Actions uses same Docker setup                | Automated testing mirrors production   |
+| **Kubernetes Direct Path** | Same containers deploy to AWS EKS                    | No translation layer, proven to work   |
+| **Scaling Capability**     | Test multi-pod setups locally                        | Understand distributed system behavior |
+| **Clean Cleanup**          | `docker-compose down` removes everything             | vs uninstalling Homebrew packages      |
+
+### 8.4 Local Development Setup (After This Phase)
+
+**Simple 3-command setup (Phase 2 complete):**
+
+```bash
+# 1. Spin up containers (PostgreSQL + Redis)
+docker-compose up -d
+
+# 2. Run database migrations inside container
+docker-compose exec postgres psql -U claims_user -d claims_engine -c "select 1;"
+
+# 3. Start your FastAPI app (runs on your MacBook, talks to containers)
+uvicorn src.api.main:app --reload
+
+# API available at http://localhost:8000
+# Swagger docs at http://localhost:8000/docs
+```
+
+**vs Homebrew approach we're replacing (6+ manual steps):**
+
+```bash
+# OLD APPROACH - Being removed:
+brew install postgresql@15
+brew install redis
+brew services start postgresql@15
+brew services start redis
+psql -U postgres < setup_db.sql
+createdb claims_engine
+# + more configuration steps...
+```
+
+### 8.5 Files Being Changed for Docker
+
+**DELETING (Homebrew-specific, no longer needed):**
+
+- `scripts/setup_phase2.sh` - Contains Homebrew instructions
+- `docs/PHASE_2_SETUP.md` - Contains 500+ lines of Homebrew setup
+
+**UPDATING (For Docker networking):**
+
+- `.env.example` - Change `localhost` → `postgres` (Docker service name)
+- `src/db/database.py` - Update DB_HOST to use Docker service name
+- `src/cache/redis_client.py` - Update REDIS_HOST to use Docker service name
+
+**CREATING (Docker infrastructure):**
+
+- `docker-compose.yml` - PostgreSQL 15 + Redis 7 + network config
+- `Dockerfile` - Build FastAPI app image
+- `k8s/deployment.yaml` - Kubernetes deployment manifest
+- `k8s/service.yaml` - Kubernetes service manifest
+- `k8s/configmap.yaml` - Kubernetes configuration
+- `docs/DOCKER_SETUP.md` - New simple 3-command setup guide
+
+### 8.6 Why NOT Local Homebrew Installation (For This Project)
+
+**Reasons we rejected Homebrew approach:**
+
+1. ❌ **Different environments**: MacBook PostgreSQL ≠ Production PostgreSQL version/config
+2. ❌ **Hard to reproduce**: New developers waste time with Homebrew issues
+3. ❌ **Messy system**: PostgreSQL + Redis clutter MacBook (ports, processes, data)
+4. ❌ **No Kubernetes experience**: You never practice containerized workflows
+5. ❌ **CI/CD mismatch**: GitHub Actions can't use your Homebrew setup (needs Docker)
+6. ❌ **Production bugs missed**: "Works locally but fails on K8s" (common problem)
+
+**Docker solves all of these:**
+
+1. ✅ Same image locally and in production
+2. ✅ One-line setup via `docker-compose up`
+3. ✅ Clean system (containers are isolated)
+4. ✅ Production-realistic workflows
+5. ✅ CI/CD uses same Docker images
+6. ✅ Container issues caught in development
+
+### 8.7 Commitment: This Architecture Is Final
+
+**DECISION LOCKED IN:**
+
+- ✅ Full Docker containerization (locally)
+- ✅ All services in containers (PostgreSQL, Redis)
+- ✅ FastAPI runs natively on MacBook (connects to containers)
+- ✅ Same Docker images deploy to Kubernetes
+- ✅ No Homebrew installation of database services
+- ✅ No deviation from this architecture
+
+**Timeline:**
+
+- Phase 2 (Current): Set up Docker infrastructure (this document)
+- Phase 3: API endpoints (use docker-compose + FastAPI)
+- Phase 4-6: ML/LLM (runs in Docker, use pre-trained models locally)
+- Phase 9: Deploy to AWS Kubernetes (same Docker images)
 
 ---
 

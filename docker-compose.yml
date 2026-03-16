@@ -1,0 +1,168 @@
+# docker-compose.yml
+# ============================================
+# Docker Compose Configuration
+# ============================================
+#
+# PURPOSE: Define all services (PostgreSQL, Redis, FastAPI) in one file
+# This allows running the entire stack with: docker-compose up
+#
+# WHAT THIS DOES:
+#   - Defines PostgreSQL 15 container (database)
+#   - Defines Redis 7 container (cache)
+#   - Sets up network for containers to communicate
+#   - Mounts volumes for persistent data
+#   - Loads .env file for configuration
+#
+# WHY THIS APPROACH:
+#   - Single command to start all services
+#   - Same setup across all developer machines
+#   - Easy to tear down: docker-compose down
+#   - Identical to production Kubernetes setup
+#
+# USAGE:
+#   Start services: docker-compose up -d
+#   Stop services:  docker-compose down
+#   View logs:      docker-compose logs -f postgres
+#   Run command:    docker-compose exec postgres psql -U claims_user -d claims_db
+
+# ============================================
+# SERVICES (Containers)
+# ============================================
+services:
+  # ============================================
+  # PostgreSQL 15 Database
+  # ============================================
+  postgres:
+    image: postgres:15-alpine
+    # Alpine = lightweight Linux, smaller Docker image
+
+    container_name: claims-postgres
+    # Container name (makes it easier to reference)
+
+    environment:
+      # ============================================
+      # PostgreSQL Configuration
+      # ============================================
+      POSTGRES_USER: ${DB_USER:-claims_user}
+      # Root user for PostgreSQL
+      # ${DB_USER:-claims_user} = Read from .env, default to 'claims_user'
+
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-your_secure_password}
+      # Root password for PostgreSQL
+      # NEVER commit actual password to Git
+
+      POSTGRES_DB: ${DB_NAME:-claims_db}
+      # Database name to create automatically
+
+    ports:
+      - "${DB_PORT:-5434}:5432"
+      # Map container port 5432 to host port 5434
+      # Format: HOST_PORT:CONTAINER_PORT
+      # FastAPI will connect to postgres:5432 (or localhost:5434 from host)
+
+    volumes:
+      # ============================================
+      # Persistent Data Storage
+      # ============================================
+      - postgres_data:/var/lib/postgresql/data
+      # Named volume: Survives container restart
+      # Stores all database files
+      # Docker manages location automatically
+      # Note: Using Alembic for migrations, not SQL init scripts
+
+    networks:
+      - claims-network
+      # Connect to custom network (allows container-to-container communication)
+
+    healthcheck:
+      # ============================================
+      # Health Check Configuration
+      # ============================================
+      # Tells Docker how to check if PostgreSQL is healthy
+
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-claims_user}"]
+      # Command to run: pg_isready checks if PostgreSQL is accepting connections
+
+      interval: 10s
+      # Check every 10 seconds
+
+      timeout: 5s
+      # Wait max 5 seconds for response
+
+      retries: 5
+      # After 5 failed checks, mark container as unhealthy
+      # (5 retries × 10 second interval = 50 seconds before marked unhealthy)
+
+    restart: unless-stopped
+    # Restart policy: Auto-restart if crashes (unless manually stopped)
+
+  # ============================================
+  # Redis 7 Cache Layer
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    # Alpine = lightweight, smaller image
+    # Redis 7 = latest stable version
+
+    container_name: claims-redis
+
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-optional_password}
+    # Command to run inside container
+    # --appendonly yes = Persist data to disk (RDB snapshots)
+    # --requirepass = Require password for authentication
+    # Password loaded from .env (or default if not set)
+
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+      # Map container port 6379 to host port 6379
+      # FastAPI will connect via this port
+
+    volumes:
+      - redis_data:/data
+      # Named volume: Persists Redis data
+      # Survives container restarts
+
+    networks:
+      - claims-network
+      # Connect to custom network
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      # Command: redis-cli (Redis command-line client) increments counter
+      # If Redis is up, returns value (healthy)
+      # If Redis is down, command fails (unhealthy)
+
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    restart: unless-stopped
+
+# ============================================
+# VOLUMES (Named Persistent Storage)
+# ============================================
+# Docker manages where these are stored (on your Mac's Docker daemon)
+# You don't need to know the exact path - Docker handles it
+
+volumes:
+  postgres_data:
+    # Volume for PostgreSQL database files
+    # Persists across container restarts
+    # Name: claims_postgres_data (in Docker)
+
+  redis_data:
+    # Volume for Redis database files
+    # Persists across container restarts
+    # Name: claims_redis_data (in Docker)
+
+# ============================================
+# NETWORKS (Container Communication)
+# ============================================
+# Docker creates a virtual network so containers can communicate
+# Using service names (postgres, redis) instead of IP addresses
+
+networks:
+  claims-network:
+    driver: bridge
+    # Bridge = containers on same network can reach each other
+    # Containers communicate by service name: postgres:5432, redis:6379

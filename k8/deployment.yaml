@@ -1,0 +1,252 @@
+# k8s/deployment.yaml
+# ============================================
+# Kubernetes Deployment Configuration
+# ============================================
+#
+# PURPOSE: Define how FastAPI is deployed on Kubernetes (Phase 9)
+#
+# WHAT THIS DOES:
+#   - Defines FastAPI Pod specification
+#   - Sets up 3 replicas (3 instances of FastAPI running)
+#   - Auto-healing: If one crashes, Kubernetes restarts it
+#   - Rolling updates: Update without downtime
+#   - Resource limits: Prevents one pod from hogging resources
+#
+# NOTE: This file is for Phase 9 (AWS Kubernetes deployment)
+#       During Phase 2-8, we use docker-compose for local development
+#
+# USAGE (Phase 9):
+#   Deploy: kubectl apply -f k8s/deployment.yaml
+#   Check:  kubectl get deployments
+#   Logs:   kubectl logs -f deployment/claims-api
+
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: claims-api
+  # Name of deployment (referenced in kubectl commands)
+
+  namespace: default
+  # Kubernetes namespace (like a project folder)
+
+  labels:
+    app: claims-engine
+    component: api
+    version: v1
+  # Labels for organizing resources
+
+spec:
+  replicas: 3
+  # Number of pod copies running simultaneously
+  # 3 = High availability (if 1 crashes, 2 others still running)
+  # Kubernetes auto-restarts if any crash
+
+  strategy:
+    type: RollingUpdate
+    # Update strategy: Replace pods gradually (not all at once)
+
+    rollingUpdate:
+      maxSurge: 1
+      # Create 1 new pod before terminating old (overlap for zero downtime)
+
+      maxUnavailable: 0
+      # Never have unavailable pods (users always get response)
+
+  selector:
+    matchLabels:
+      app: claims-engine
+      component: api
+  # Selector: "Manage pods with these labels"
+
+  template:
+    metadata:
+      labels:
+        app: claims-engine
+        component: api
+      # Pod labels (must match selector above)
+
+    spec:
+      containers:
+        - name: claims-api
+          # Container name
+
+          image: your_registry/claims-engine:latest
+          # Image to run (from your Docker registry)
+          # Format: registry/image:tag
+          # Example: 123456789.dkr.ecr.ap-southeast-1.amazonaws.com/claims-engine:v1.0.0
+
+          imagePullPolicy: IfNotPresent
+          # Only pull if image doesn't exist locally
+
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          # Expose port 8000 (FastAPI default)
+
+          env:
+            # Environment variables (from .env file)
+
+            - name: APP_ENV
+              value: "production"
+
+            - name: DB_HOST
+              value: "postgres"
+              # Kubernetes DNS: postgres service
+
+            - name: DB_PORT
+              value: "5432"
+
+            - name: REDIS_HOST
+              value: "redis"
+              # Kubernetes DNS: redis service
+
+            - name: REDIS_PORT
+              value: "6379"
+
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: username
+              # Read from Kubernetes Secret
+
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: password
+              # Read from Kubernetes Secret (never in YAML!)
+
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: secret-key
+              # Read from Kubernetes Secret
+
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+              # Read from Kubernetes Secret
+
+          resources:
+            requests:
+              memory: "512Mi"
+              # Request: 512 MB RAM
+              # Kubernetes guarantees at least this much
+
+              cpu: "250m"
+              # Request: 250 millicores (0.25 CPU)
+
+            limits:
+              memory: "1Gi"
+              # Limit: Max 1 GB RAM (prevent runaway)
+
+              cpu: "500m"
+              # Limit: Max 500 millicores (0.5 CPU)
+            # If exceeds limit, pod is killed and restarted
+
+          livenessProbe:
+            # Is pod alive? (restart if not)
+
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            # Check /health endpoint
+
+            initialDelaySeconds: 10
+            # Wait 10 seconds before first check (startup time)
+
+            periodSeconds: 10
+            # Check every 10 seconds
+
+            timeoutSeconds: 5
+            # Wait 5 seconds for response
+
+            failureThreshold: 3
+            # After 3 failures, restart pod
+
+          readinessProbe:
+            # Is pod ready to serve traffic?
+
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+            # After 2 failures, remove from load balancer
+
+          volumeMounts:
+            - name: models-cache
+              mountPath: /app/models
+              # Mount directory where ML models are stored
+
+      volumes:
+        - name: models-cache
+          emptyDir: {}
+          # Temporary volume (rebuilt on pod restart)
+          # For caching downloaded models
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        # Run as non-root user (security best practice)
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - claims-engine
+                topologyKey: kubernetes.io/hostname
+        # Prefer spreading pods across different nodes
+        # (if 1 node fails, not all pods affected)
+
+---
+# HorizontalPodAutoscaler: Auto-scale based on load
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+
+metadata:
+  name: claims-api-hpa
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: claims-api
+
+  minReplicas: 3
+  # Minimum pods: 3
+
+  maxReplicas: 10
+  # Maximum pods: 10 (during traffic surge)
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+          # If average CPU > 70%, add more pods
+
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+          # If average memory > 80%, add more pods
